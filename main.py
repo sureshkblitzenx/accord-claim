@@ -13,7 +13,7 @@ import fitz                         # PyMuPDF  – rasterise pages
 
 import pytesseract
 
-pytesseract.pytesseract.tesseract_cmd = r"Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"/usr/bin/tesseract"
                   # Tesseract OCR  – api1 (basic)
 from PIL import Image               # Pillow
 import io, base64, json
@@ -67,7 +67,7 @@ def pdf_to_pil_images(pdf_path, dpi=200):
     return convert_from_path(
         pdf_path,
         dpi=dpi,
-        poppler_path=r"poppler-26.02.0\Library\bin"
+        poppler_path=r"/usr/bin"
     )
 
 
