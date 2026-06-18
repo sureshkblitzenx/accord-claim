@@ -1,49 +1,79 @@
 import re
-import json
 from typing import Optional
 
 
 def extract_acord_fields(raw_text: str) -> dict:
     """
-    Extract all labelled fields from ACORD form OCR text.
+    Extract ACORD GL form fields and return them in the GL payload
+    transformation format.
 
     Args:
         raw_text: Raw string extracted from scanned ACORD PDF.
 
     Returns:
-        dict: Structured JSON-serialisable dictionary of all fields.
+        dict: Flat/nested JSON matching the GL payload schema.
     """
 
     def find(pattern: str, text: str, group: int = 1) -> Optional[str]:
-        """Return first regex match or None, stripped."""
         m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         return m.group(group).strip() if m else None
 
     # ------------------------------------------------------------------ #
-    #  CLIENT / INSURED DETAILS
+    #  POLICY / HEADER
     # ------------------------------------------------------------------ #
-    client = {
-        "insured_name":   find(r"INSURED:\s+([A-Z\s]+CLIENT)", raw_text),
-        "item_id":        find(r"ITEM ID[:\s]+(\d+)", raw_text),
-        "client_code":    find(r"Client Code\s+\d?\s+(\w+)", raw_text),
-        "bill_to":        find(r"Bill To\s+['\w]+\s+Q?\s+'?([^\n]+)", raw_text),
-        "division":       find(r"Division\s+\d+\s+Q\s+(.+?)(?:\n|$)", raw_text),
-        "last_entry":     find(r"Last Entry\s+([\d/]+)", raw_text),
-        "last_user":      find(r"Last User\s+'?(\w+)", raw_text),
+    policy = {
+        "AccountNumber":        find(r"AGENCY CUSTOMER ID[:\s]+(\w+)", raw_text),
+        "PolicyNumber":         find(r"Policy Number\s+\d+\s+=?\s*(\w+)", raw_text),
+        "EffectiveDate":        find(r"Effective Date\s+\(?([\d/]+)", raw_text),
+        "ExpirationDate":       find(r"Expiration Date\s+\(?([\d/]+)", raw_text),
+        "OriginalEffectiveDate":find(r"Original Effective Date\s+\(?([\d/]+)", raw_text),
+        "PolicyType":           find(r"Policy Type\s+\w+\s+Q\s+(\w+)", raw_text),
+        "LineOfBusiness":       find(r"Coverage\s+\d+\s+\[?\w+\]?\s+\|?&?\s+([^\n]+)", raw_text),
+        "BillMethod":           find(r"Bill Method\s+\[([^\]]+)\]", raw_text),
+        "PaymentPlan":          find(r"Payment Plan\s+\w+\s+\|?Q\s+(\w+)", raw_text),
+        "Term":                 find(r"\bTerm\s+\[([A-Za-z\-]+)", raw_text),
+        "AuditTerm":            find(r"Audit Term\s+(A-\w+|Annual|Monthly|Quarterly)", raw_text),
+        "Status":               find(r"\bStatus\s+(\w+)", raw_text),
+        "CommissionPct":        find(r"Commission\s*%\s*([\d.]+)", raw_text),
+        "SICCode":              find(r"SIC Code\s+(\d+)", raw_text),
+        "SICDescription":       find(r"SIC Code\s+\d+\s+Q\s+([^\n]+)", raw_text),
+        "Description":          find(r"Description\s+([^\n]+?)(?:Mapping|$)", raw_text),
+        "Producer":             find(r"Producers?\s+\d*\s+([^\n]+)", raw_text),
+        "Servicer":             find(r"Servicer\s+\w+\s+\|?Q\s+([^\n]+)", raw_text),
+        "SourceDate":           find(r"Source Date\s+\(?([\d/]+)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  ADDRESS
+    #  INSURED / NAMED INSURED
     # ------------------------------------------------------------------ #
-    address = {
-        "address_line_1": find(r"Address #1[^[]*\[([^\]\n]{1,60})\]", raw_text)
-                          or find(r"Address #1\s+\d+\s+\[?(\d+\s*\w[\w\s]{0,40}?)(?:\n|Address)", raw_text),
-        "zip_code":       find(r"Zip Code\s+\d+\s+(\d{4,10})", raw_text),
-        "state":          find(r"\bState\s+([A-Z]{2})\b", raw_text),
+    named_insured = {
+        "InsuredName":    find(r"INSURED:\s+([A-Z\s]+CLIENT)", raw_text),
+        "ItemID":         find(r"ITEM ID[:\s]+(\d+)", raw_text),
+        "ClientCode":     find(r"Client Code\s+\d?\s+(\w+)", raw_text),
+        "BillTo":         find(r"Bill To\s+['\w]+\s+Q?\s+'?([^\n]+)", raw_text),
+        "Division":       find(r"Division\s+\d+\s+Q\s+(.+?)(?:\n|$)", raw_text),
+        "LastEntry":      find(r"Last Entry\s+([\d/]+)", raw_text),
+        "LastUser":       find(r"Last User\s+'?(\w+)", raw_text),
+        "FEIN":           find(r"FEIN\s+\d*\s+([\d]+)", raw_text),
+        "LegalEntity":    find(r"Legal Entity\s+\w+\s+\|?Q\s+(\w+)", raw_text),
+        "DateBizStarted": find(r"Date Business Started\s+([\d/]+)", raw_text),
+        "YearsInBusiness":find(r"Years in Business\s+(\d+)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  PHONE / CONTACT
+    #  MAILING ADDRESS
+    # ------------------------------------------------------------------ #
+    mailing_address = {
+        "AddressLine1": (
+            find(r"Address #1[^[]*\[([^\]\n]{1,60})\]", raw_text)
+            or find(r"Address #1\s+\d+\s+\[?(\d+\s*\w[\w\s]{0,40}?)(?:\n|Address)", raw_text)
+        ),
+        "ZipCode": find(r"Zip Code\s+\d+\s+(\d{4,10})", raw_text),
+        "State":   find(r"\bState\s+([A-Z]{2})\b", raw_text),
+    }
+
+    # ------------------------------------------------------------------ #
+    #  PHONES
     # ------------------------------------------------------------------ #
     phones = []
     for m in re.finditer(
@@ -51,133 +81,160 @@ def extract_acord_fields(raw_text: str) -> dict:
         raw_text, re.IGNORECASE
     ):
         phones.append({
-            "phone_number": m.group(2).strip(),
-            "extension":    m.group(3).strip() or None,
-            "phone_type":   m.group(4).strip(),
+            "PhoneNumber": m.group(2).strip(),
+            "Extension":   m.group(3).strip() or None,
+            "PhoneType":   m.group(4).strip(),
         })
 
+    # ------------------------------------------------------------------ #
+    #  CONTACT
+    # ------------------------------------------------------------------ #
     contact = {
-        "phones":           phones,
-        "fax_number":       find(r"Fax Number\s+([\d]+)", raw_text),
-        "contact_method":   find(r"Contact Method\s+(\w+)", raw_text),
-        "website":          find(r"Website\s+(www\.\S+)", raw_text),
-        "fein":             find(r"FEIN\s+\d*\s+([\d]+)", raw_text),
-        "legal_entity":     find(r"Legal Entity\s+\w+\s+\|?Q\s+(\w+)", raw_text),
-        "date_biz_started": find(r"Date Business Started\s+([\d/]+)", raw_text),
-        "years_in_business":find(r"Years in Business\s+(\d+)", raw_text),
+        "Phones":          phones,
+        "FaxNumber":       find(r"Fax Number\s+([\d]+)", raw_text),
+        "ContactMethod":   find(r"Contact Method\s+(\w+)", raw_text),
+        "Website":         find(r"Website\s+(www\.\S+)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
     #  PRIMARY CONTACT
     # ------------------------------------------------------------------ #
     primary_contact = {
-        "first_name":    find(r"FirstName\s+\d+\s+(\S+)", raw_text),
-        "middle_name":   find(r"Middle Name\s+(\S+)", raw_text),
-        "last_name":     find(r"Last Name\s+(\w+)", raw_text),
-        "salutation":    find(r"Salutation\s+'?(\w+\.?)", raw_text),
-        "profession":    find(r"Contact Profession\s+(\w+)", raw_text),
-        "primary_phone": find(r"PrimaryPhone\s+\d+\s+([\d\-]+)", raw_text),
-        "phone_ext":     find(r"PrimaryPhone[^\n]+Ext:\s*(\d+)", raw_text),
-        "primary_email": find(r"PrimaryEmail\s+\d+\s+(\S+@\S+)", raw_text),
-        "primary_address": find(r"Primary Address\s+\d+\s+([^\n]+)", raw_text),
-        "contact_type":  find(r"Contact Type\s+\w+\s+\|?Q\s+(\w+)", raw_text),
-        "contact_codes": find(r"Contact Codes\s+([\w\-\(\)]+)", raw_text),
+        "FirstName":      find(r"FirstName\s+\d+\s+(\S+)", raw_text),
+        "MiddleName":     find(r"Middle Name\s+(\S+)", raw_text),
+        "LastName":       find(r"Last Name\s+(\w+)", raw_text),
+        "Salutation":     find(r"Salutation\s+'?(\w+\.?)", raw_text),
+        "Profession":     find(r"Contact Profession\s+(\w+)", raw_text),
+        "PrimaryPhone":   find(r"PrimaryPhone\s+\d+\s+([\d\-]+)", raw_text),
+        "PhoneExt":       find(r"PrimaryPhone[^\n]+Ext:\s*(\d+)", raw_text),
+        "PrimaryEmail":   find(r"PrimaryEmail\s+\d+\s+(\S+@\S+)", raw_text),
+        "PrimaryAddress": find(r"Primary Address\s+\d+\s+([^\n]+)", raw_text),
+        "ContactType":    find(r"Contact Type\s+\w+\s+\|?Q\s+(\w+)", raw_text),
+        "ContactCodes":   find(r"Contact Codes\s+([\w\-\(\)]+)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  POLICY DETAILS
+    #  CARRIER
     # ------------------------------------------------------------------ #
-    policy = {
-        "policy_number":          find(r"Policy Number\s+\d+\s+=?\s*(\w+)", raw_text),
-        "effective_date":         find(r"Effective Date\s+\(?([\d/]+)", raw_text),
-        "expiration_date":        find(r"Expiration Date\s+\(?([\d/]+)", raw_text),
-        "original_effective_date":find(r"Original Effective Date\s+\(?([\d/]+)", raw_text),
-        "description":            find(r"Description\s+([^\n]+?)(?:Mapping|$)", raw_text),
-        "division_agency":        find(r"Division\s+\d+\s+QQ\s+([^\n]+)", raw_text),
-        "commission_pct":         find(r"Commission\s*%\s*([\d.]+)", raw_text),
-        "sic_code":               find(r"SIC Code\s+(\d+)", raw_text),
-        "sic_description":        find(r"SIC Code\s+\d+\s+Q\s+([^\n]+)", raw_text),
-        "policy_type":            find(r"Policy Type\s+\w+\s+Q\s+(\w+)", raw_text),
-        "coverage":               find(r"Coverage\s+\d+\s+\[?\w+\]?\s+\|?&?\s+([^\n]+)", raw_text),
-        "bill_method":            find(r"Bill Method\s+\[([^\]]+)\]", raw_text),
-        "term":                   find(r"\bTerm\s+\[([A-Za-z\-]+)", raw_text),
-        "audit_term":             find(r"Audit Term\s+(A-\w+|Annual|Monthly|Quarterly)", raw_text),
-        "status":                 find(r"\bStatus\s+(\w+)", raw_text),
-        "payment_plan":           find(r"Payment Plan\s+\w+\s+\|?Q\s+(\w+)", raw_text),
-        "carrier":                find(r"(The Hartford Ins\. Group)", raw_text),
-        "producer":               find(r"Producers?\s+\d*\s+([^\n]+)", raw_text),
-        "servicer":               find(r"Servicer\s+\w+\s+\|?Q\s+([^\n]+)", raw_text),
-        "source_date":            find(r"Source Date\s+\(?([\d/]+)", raw_text),
+    carrier = {
+        "CarrierName": find(r"(The Hartford Ins\. Group)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  CLAIMS / LOSS
+    #  GENERAL LIABILITY COVERAGES
+    # ------------------------------------------------------------------ #
+
+    # Each occurrence / aggregate limit pulled by label
+    gl_coverages = {
+        "OccurrenceLimit":              find(r"Each Occurrence\s+\$?([\d,]+)", raw_text),
+        "GeneralAggregateLimit":        find(r"General Aggregate\s+\$?([\d,]+)", raw_text),
+        "ProductsCompOpsAggregate":     find(r"Products\s*[-–]\s*Comp[^\n]*\$?([\d,]+)", raw_text),
+        "PersonalAdvInjuryLimit":       find(r"Personal\s*&?\s*Adv\s*Injury\s+\$?([\d,]+)", raw_text),
+        "FireDamageLegalLiability":     find(r"Fire Damage\s+\$?([\d,]+)", raw_text),
+        "MedicalExpenseLimit":          find(r"Med\s*Exp[^\n]*\$?([\d,]+)", raw_text),
+        "Deductible":                   find(r"Deductible\s+\$?([\d,]+)", raw_text),
+        "PremiumBasis":                 find(r"Premium Basis\s+([^\n]+)", raw_text),
+        "ClassCode":                    find(r"Class\s*Code\s+(\d+)", raw_text),
+        "ClassDescription":             find(r"Classification\s+([^\n]+)", raw_text),
+        "Exposure":                     find(r"\bExposure\s+([\d,]+)", raw_text),
+        "Rate":                         find(r"\bRate\s+([\d.]+)", raw_text),
+        "AdvancePremium":               find(r"Advance\s+Premium\s+\$?([\d,]+)", raw_text),
+        "AuditedPremium":               find(r"Audited\s+Premium\s+\$?([\d,]+)", raw_text),
+        "WrittenPremium":               find(r"Written\s+Premium\s+\$?([\d,]+)", raw_text),
+        "PolicyPremium":                find(r"Policy\s+Premium\s+\$?([\d,]+)", raw_text),
+        "MinimumPremium":               find(r"Minimum\s+Premium\s+\$?([\d,]+)", raw_text),
+        "DepositPremium":               find(r"Deposit\s+Premium\s+\$?([\d,]+)", raw_text),
+        "AdditionalInsuredEndorsement": find(r"Additional Insured\s+([^\n]+)", raw_text),
+        "WaiverOfSubrogation":          find(r"Waiver of Subrogation\s+([^\n]+)", raw_text),
+        "UmbrellaRequired":             find(r"Umbrella\s+Required\s+(\w+)", raw_text),
+        "UmbrellaCarrier":              find(r"Umbrella\s+Carrier\s+([^\n]+)", raw_text),
+        "UmbrellaLimit":                find(r"Umbrella\s+Limit\s+\$?([\d,]+)", raw_text),
+    }
+
+    # ------------------------------------------------------------------ #
+    #  LOCATIONS
+    # ------------------------------------------------------------------ #
+    locations = []
+    for m in re.finditer(
+        r"Location\s+(\d+)[^\n]*\n\s*([^\n]+)\n\s*([^\n]+)",
+        raw_text, re.IGNORECASE
+    ):
+        locations.append({
+            "LocationNumber": m.group(1).strip(),
+            "AddressLine1":   m.group(2).strip(),
+            "CityStateZip":   m.group(3).strip(),
+        })
+
+    # ------------------------------------------------------------------ #
+    #  LOSS / CLAIMS
     # ------------------------------------------------------------------ #
     loss = {
-        "loss_id":          find(r"Loss I\.?D\.?\s+(\w+)", raw_text),
-        "loss_type":        find(r"LossType\s+\d+[^@\n]+?(\w[\w\s]+Loss)", raw_text),
-        "loss_amount":      find(r"Loss Amount\s+([\d,]+)", raw_text),
-        "loss_date":        find(r"LossDate\s+\d+\s+\(?([\d/]+)", raw_text),
-        "loss_time":        find(r"LossTime\s+\d+\s+([\d:apm]+)", raw_text),
-        "reported_date":    find(r"Reported Date\s+\(?([\d/]+)", raw_text),
-        "loss_location":    find(r"Location\?\s+\d+\s+\d+\s+Q\s+([^;]+)", raw_text),
-        "loss_city":        find(r"City\s+([A-Za-z\s]+)\s+State", raw_text),
-        "description_of_loss": find(r"Description of Loss Field\s+([^\n]+)", raw_text),
-        "cat_loss":         find(r"Cat Loss\s+(\w+)\b(?!\d{2})", raw_text) or find(r"CatLoss:([YN])", raw_text),
+        "LossID":            find(r"Loss I\.?D\.?\s+(\w+)", raw_text),
+        "LossType":          find(r"LossType\s+\d+[^@\n]+?(\w[\w\s]+Loss)", raw_text),
+        "LossAmount":        find(r"Loss Amount\s+([\d,]+)", raw_text),
+        "LossDate":          find(r"LossDate\s+\d+\s+\(?([\d/]+)", raw_text),
+        "LossTime":          find(r"LossTime\s+\d+\s+([\d:apm]+)", raw_text),
+        "ReportedDate":      find(r"Reported Date\s+\(?([\d/]+)", raw_text),
+        "LossLocation":      find(r"Location\?\s+\d+\s+\d+\s+Q\s+([^;]+)", raw_text),
+        "LossCity":          find(r"City\s+([A-Za-z\s]+)\s+State", raw_text),
+        "DescriptionOfLoss": find(r"Description of Loss Field\s+([^\n]+)", raw_text),
+        "CatLoss":           find(r"Cat Loss\s+(\w+)\b(?!\d{2})", raw_text) or find(r"CatLoss:([YN])", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  ADJUSTER INFO
+    #  ADJUSTER
     # ------------------------------------------------------------------ #
     adjuster = {
-        "name":      find(r"Adjuster Name\s+\d+\s+\|?\s*([^\n]+)", raw_text),
-        "phone":     find(r"Adjuster Phone\s+\d+\s+([\d\s\-]+)", raw_text),
-        "phone_ext": find(r"Adjuster Phone Ext\s+\d+\s+(\d+)", raw_text),
-        "email":     find(r"Adjuster Email\s+\d+\s+(\S+@\S+)", raw_text),
+        "AdjusterName":     find(r"Adjuster Name\s+\d+\s+\|?\s*([^\n]+)", raw_text),
+        "AdjusterPhone":    find(r"Adjuster Phone\s+\d+\s+([\d\s\-]+)", raw_text),
+        "AdjusterPhoneExt": find(r"Adjuster Phone Ext\s+\d+\s+(\d+)", raw_text),
+        "AdjusterEmail":    find(r"Adjuster Email\s+\d+\s+(\S+@\S+)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
     #  CLAIMANT
     # ------------------------------------------------------------------ #
     claimant = {
-        "name":           find(r"CLAIMANT NAME\s*\n[^\n]*\n\s*\d+\s+[A-Z]+\s+\*+\s+\w+\s+([^\n]+)", raw_text),
-        "address":        find(r"(\d+\s+\w+\s+St\.?,\s*\w+,?\s*\w+\s*\d+).*?36", raw_text),
-        "home_phone":     find(r"Home Phone\s*#\s*\d+\s+([\d\-]+)", raw_text),
-        "business_phone": find(r"Business Phone\s*#\s*\d+\s+([\d\-]+)", raw_text),
-        "ssn_fein":       find(r"SSNE?\s+(\w+)", raw_text),
-        "status":         find(r"Status\s+°?\s+Q\s+([\w\s]+?)(?:\s+Home Phone|\s+Type|\n|$)", raw_text),
-        "type_of_loss":   find(r"Type of Loss\s+\w\s+Q\s+([\w\s]+?)(?:\s+Business Phone|\s+Injured|\n|$)", raw_text),
+        "ClaimantName":     find(r"CLAIMANT NAME\s*\n[^\n]*\n\s*\d+\s+[A-Z]+\s+\*+\s+\w+\s+([^\n]+)", raw_text),
+        "ClaimantAddress":  find(r"(\d+\s+\w+\s+St\.?,\s*\w+,?\s*\w+\s*\d+).*?36", raw_text),
+        "HomePhone":        find(r"Home Phone\s*#\s*\d+\s+([\d\-]+)", raw_text),
+        "BusinessPhone":    find(r"Business Phone\s*#\s*\d+\s+([\d\-]+)", raw_text),
+        "SSNFEIN":          find(r"SSNE?\s+(\w+)", raw_text),
+        "ClaimantStatus":   find(r"Status\s+°?\s+Q\s+([\w\s]+?)(?:\s+Home Phone|\s+Type|\n|$)", raw_text),
+        "TypeOfLoss":       find(r"Type of Loss\s+\w\s+Q\s+([\w\s]+?)(?:\s+Business Phone|\s+Injured|\n|$)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  ACORD FORM META
+    #  FORM META
     # ------------------------------------------------------------------ #
     form_meta = {
-        "agency":             find(r"(The ABC General Agency,\s*Inc\.?)", raw_text),
-        "agency_customer_id": find(r"AGENCY CUSTOMER ID[:\s]+(\w+)", raw_text),
-        "form_number":        find(r"FORM NUMBER:\s+(\d+)", raw_text),
-        "form_title":         find(r"FORM TITLE:\s+([^\n]+)", raw_text),
-        "producer_address":   find(r"P\.O\. Box\s+\d+\s+\n?\s*([^\n]+)", raw_text),
-        "reported_by":        find(r"REPORTED BY\s+([^\n]+)", raw_text),
-        "reported_to":        find(r"REPORTED TO\s+([^\n]+)", raw_text),
+        "Agency":           find(r"(The ABC General Agency,\s*Inc\.?)", raw_text),
+        "AgencyCustomerID": find(r"AGENCY CUSTOMER ID[:\s]+(\w+)", raw_text),
+        "FormNumber":       find(r"FORM NUMBER:\s+(\d+)", raw_text),
+        "FormTitle":        find(r"FORM TITLE:\s+([^\n]+)", raw_text),
+        "ProducerAddress":  find(r"P\.O\. Box\s+\d+\s+\n?\s*([^\n]+)", raw_text),
+        "ReportedBy":       find(r"REPORTED BY\s+([^\n]+)", raw_text),
+        "ReportedTo":       find(r"REPORTED TO\s+([^\n]+)", raw_text),
     }
 
     # ------------------------------------------------------------------ #
-    #  ASSEMBLE OUTPUT
+    #  ASSEMBLE — matches GL payload transformation schema
     # ------------------------------------------------------------------ #
     result = {
-        "client":          client,
-        "address":         address,
-        "contact":         contact,
-        "primary_contact": primary_contact,
-        "policy":          policy,
-        "loss":            loss,
-        "adjuster":        adjuster,
-        "claimant":        claimant,
-        "form_meta":       form_meta,
+        "Policy":          policy,
+        "NamedInsured":    named_insured,
+        "MailingAddress":  mailing_address,
+        "Contact":         contact,
+        "PrimaryContact":  primary_contact,
+        "Carrier":         carrier,
+        "GLCoverages":     gl_coverages,
+        "Locations":       locations,
+        "Loss":            loss,
+        "Adjuster":        adjuster,
+        "Claimant":        claimant,
+        "FormMeta":        form_meta,
     }
 
-    # Remove None values recursively for a cleaner output
     def drop_none(obj):
         if isinstance(obj, dict):
             return {k: drop_none(v) for k, v in obj.items() if v not in (None, "", [])}
