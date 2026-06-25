@@ -2,7 +2,8 @@
 FastAPI Scanned PDF OCR Extractor
 Multiple endpoints with different OCR strategies
 """
-
+import pdfplumber
+from pypdf import PdfReader
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import tempfile, os, time
@@ -14,6 +15,7 @@ import fitz                         # PyMuPDF  – rasterise pages
 import pytesseract
 
 pytesseract.pytesseract.tesseract_cmd = r"/usr/bin/tesseract"
+#pytesseract.pytesseract.tesseract_cmd = r"Tesseract-OCR\tesseract.exe"
                   # Tesseract OCR  – api1 (basic)
 from PIL import Image               # Pillow
 import io, base64, json
@@ -39,6 +41,19 @@ app = FastAPI(
         "| `/scanned_file/api4` | pdfplumber + Tesseract hybrid | Mixed native+scanned PDFs |\n"
     ),
     version="1.0.0",
+)
+
+from fastapi.middleware.cors import CORSMiddleware
+
+
+
+# Allow all origins (Development)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # EasyOCR reader initialised once (expensive)
@@ -67,7 +82,7 @@ def pdf_to_pil_images(pdf_path, dpi=200):
     return convert_from_path(
         pdf_path,
         dpi=dpi,
-        poppler_path=r"/usr/bin"
+        poppler_path=r"/usr/bin" #r"C:\Users\SureshKannan\projects\acord\poppler-26.02.0\Library\bin"    #r"/usr/bin"
     )
 
 
@@ -168,6 +183,108 @@ async def ocr_tesseract_raw(file: UploadFile = File(..., description="Scanned PD
 # ═══════════════════════════════════════════════════════════════════════════════
 # API 2 – Tesseract + OpenCV Pre-processing
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def is_scanned_pdf(pdf_path: str) -> bool:
+    """
+    Detect whether a PDF is scanned (image-based) or normal (has a text layer).
+    Strategy: try to extract text from the first few pages using pdfplumber.
+    If total extracted text is very short (< 50 chars), assume it's scanned.
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            sample_pages = pdf.pages[:3]  # check first 3 pages
+            total_text = ""
+            for page in sample_pages:
+                text = page.extract_text() or ""
+                total_text += text.strip()
+        return len(total_text) < 50  # scanned PDFs yield near-zero extractable text
+    except Exception:
+        return True  # if we can't read it, fall back to OCR path
+
+
+def extract_text_from_normal_pdf(pdf_path: str) -> list[dict]:
+    """
+    Extract text and metadata from a native (non-scanned) PDF using pdfplumber.
+    Returns a list of page dicts matching the scanned PDF output structure.
+    """
+    pages = []
+    all_text_parts = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for i, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            text = text.strip()
+            all_text_parts.append(text)
+            word_count = len(text.split()) if text else 0
+            pages.append({
+                "page": i,
+                "text": text,
+                "avg_confidence": 100.0,  # native text layer = perfect confidence
+                "word_count": word_count,
+            })
+
+    return pages, "\n\n".join(all_text_parts)
+
+
+@app.post(
+    "/scanned_file/api5",
+    summary="OCR via Tesseract (raw) with normal PDF fallback",
+    tags=["OCR Endpoints"],
+    response_description="Extracted text per page — uses Tesseract for scanned PDFs, pdfplumber for native PDFs",
+)
+async def ocr_tesseract_raw(file: UploadFile = File(..., description="Scanned or native PDF file")):
+    """
+    **Strategy:** Auto-detects whether the uploaded PDF is scanned or native.
+
+    - For **scanned PDFs**: converts each page to a high-res image and runs Tesseract OCR.
+    - For **native PDFs**: extracts the text layer directly using pdfplumber (faster, more accurate).
+
+    - ✅ Handles both scanned and native PDFs automatically
+    - ✅ Fast path for native PDFs (no OCR needed)
+    - ❌ Scanned path still struggles with skewed, noisy, or very low-res scans
+    """
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    pdf_path = save_upload(file)
+    t0 = time.time()
+    all_text = []
+
+    try:
+        scanned = is_scanned_pdf(pdf_path)
+
+        if scanned:
+            # --- Existing OCR path for scanned PDFs ---
+            images = pdf_to_pil_images(pdf_path, dpi=200)
+            pages = []
+            for i, img in enumerate(images, start=1):
+                raw = pytesseract.image_to_string(img, config="--psm 6")
+                all_text.append(raw.strip())
+                data = pytesseract.image_to_data(img, config="--psm 6", output_type=pytesseract.Output.DICT)
+                confidences = [int(c) for c in data["conf"] if str(c).isdigit() and int(c) >= 0]
+                avg_conf = round(sum(confidences) / len(confidences), 1) if confidences else 0
+                pages.append({
+                    "page": i,
+                    "text": raw.strip(),
+                    "avg_confidence": avg_conf,
+                    "word_count": len(raw.split()),
+                })
+        else:
+            # --- New native text extraction path ---
+            pages, combined_text = extract_text_from_normal_pdf(pdf_path)
+
+            all_text = [p["text"] for p in pages]
+            
+            print(all_text)
+
+        fields = extract_acord_fields("\n\n".join(all_text))
+        print(all_text)
+        return JSONResponse(fields)
+
+    finally:
+        os.unlink(pdf_path)
+
+
 @app.post(
     "/scanned_file/api2",
     summary="OCR via Tesseract + OpenCV pre-processing",
@@ -237,38 +354,10 @@ async def ocr_easyocr(file: UploadFile = File(..., description="Scanned PDF file
     pdf_path = save_upload(file)
     t0 = time.time()
     try:
-        reader = get_easy_reader()
-        images = pdf_to_pil_images(pdf_path, dpi=200)
-        pages = []
-        for i, img in enumerate(images, start=1):
-            cv_img = pil_to_cv2(img)
-            results = reader.readtext(cv_img)
-            words = []
-            lines = []
-            for (bbox, text, conf) in results:
-                words.append({
-                    "text": text,
-                    "confidence": round(conf, 4),
-                    "bounding_box": {
-                        "top_left":     [int(bbox[0][0]), int(bbox[0][1])],
-                        "top_right":    [int(bbox[1][0]), int(bbox[1][1])],
-                        "bottom_right": [int(bbox[2][0]), int(bbox[2][1])],
-                        "bottom_left":  [int(bbox[3][0]), int(bbox[3][1])],
-                    },
-                })
-                lines.append(text)
-            full = " ".join(lines)
-            avg_conf = round(
-                sum(w["confidence"] for w in words) / len(words), 4
-            ) if words else 0
-            pages.append({
-                "page": i,
-                "text": full.strip(),
-                "avg_confidence": avg_conf,
-                "word_count": len(lines),
-                "detected_regions": words,
-            })
-        return JSONResponse(content=build_response(pages, "easyocr_deep_learning", time.time() - t0))
+        pages, combined_text = extract_text_from_normal_pdf(pdf_path)
+        all_text = [p["text"] for p in pages]
+        fields = extract_acord_fields("\n\n".join(all_text))
+        return JSONResponse(fields)
     finally:
         os.unlink(pdf_path)
 
@@ -360,3 +449,16 @@ async def ocr_hybrid(file: UploadFile = File(..., description="Scanned PDF or mi
 @app.get("/health", tags=["Utility"])
 async def health():
     return {"status": "ok", "version": "1.0.0"}
+
+from fastapi.middleware.cors import CORSMiddleware
+
+
+
+# Allow all origins (Development)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
